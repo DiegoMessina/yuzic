@@ -1,0 +1,72 @@
+# Da copiare nel fork pubblico di yuzicapp/yuzic come
+# .github/workflows/build-ios-unsigned.yml
+# Produce un .ipa NON firmato, da firmare poi su Windows con Sideloadly/AltStore
+# usando un Apple ID gratuito. Non testato: primo tentativo, da correggere sui log.
+name: iOS unsigned IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # Come il workflow ufficiale: --omit=dev tiene expo-dev-client fuori dalla build release
+      - name: Install Node dependencies
+        run: npm ci --omit=dev
+
+      - name: Verify patches are applied
+        run: ./tools/verify-patches.sh
+
+      # CarPlay e multicast richiedono entitlement approvati da Apple:
+      # con un Apple ID gratuito la firma fallirebbe, quindi li togliamo.
+      - name: Remove paid-only entitlements
+        run: |
+          /usr/libexec/PlistBuddy -c "Delete :com.apple.developer.carplay-audio" ios/Yuzic/Yuzic.entitlements || true
+          /usr/libexec/PlistBuddy -c "Delete :com.apple.developer.networking.multicast" ios/Yuzic/Yuzic.entitlements || true
+          cat ios/Yuzic/Yuzic.entitlements
+
+      - name: Install CocoaPods
+        run: |
+          cd ios
+          pod install --repo-update
+
+      - name: Build (no code signing)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -workspace ios/Yuzic.xcworkspace \
+            -scheme Yuzic \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | tee xcodebuild.log
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/Yuzic.app Payload/
+          zip -qry Yuzic-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Yuzic-unsigned-ipa
+          path: Yuzic-unsigned.ipa
+
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: xcodebuild.log
